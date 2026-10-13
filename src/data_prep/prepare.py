@@ -266,11 +266,13 @@ def prepare_dataset(settings: AppSettings, profile: str) -> PreparedArtifacts:
         how="left",
         on=["product_locale", "product_id"],
         validate="many_to_one",
+        indicator=True,
     )
 
-    missing_products = combined["product_title"].isna().sum()
+    missing_products = int((combined["_merge"] == "left_only").sum())
     if missing_products:
         raise ValueError(f"Missing product metadata for {missing_products} ESCI examples.")
+    combined = combined.drop(columns=["_merge"])
 
     combined = _normalize_text_columns(combined)
     combined = combined.merge(sources, how="left", on="query_id")
