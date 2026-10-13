@@ -7,10 +7,40 @@ from typing import Any
 import pandas as pd
 
 from common.config import AppSettings
-from common.constants import RAW_COLUMNS, TEXT_COLUMNS
+from common.constants import TEXT_COLUMNS
 from common.io import ensure_dir, write_json
 from common.runtime import stable_hash_int
 from common.text import lexical_overlap_score, unique_join
+
+
+EXAMPLE_COLUMNS = [
+    "example_id",
+    "query",
+    "query_id",
+    "product_id",
+    "product_locale",
+    "esci_label",
+    "small_version",
+    "large_version",
+    "split",
+]
+
+PRODUCT_COLUMNS = [
+    "product_id",
+    "product_locale",
+    "product_title",
+    "product_description",
+    "product_bullet_point",
+    "product_brand",
+    "product_color",
+]
+
+ESCI_LABEL_MAP = {
+    "E": "Exact",
+    "S": "Substitute",
+    "C": "Complement",
+    "I": "Irrelevant",
+}
 
 
 @dataclass(frozen=True)
@@ -25,17 +55,23 @@ class PreparedArtifacts:
     data_quality_report: Path
 
 
-def _read_split(path: Path, split_name: str) -> pd.DataFrame:
-    frame = pd.read_parquet(path, columns=RAW_COLUMNS)
-    frame["split"] = split_name
-    return frame
-
-
 def _stable_query_sample(query_ids: list[int], sample_size: int | None) -> set[int]:
     if sample_size is None or sample_size >= len(query_ids):
         return set(query_ids)
     ranked = sorted(query_ids, key=stable_hash_int)
     return set(ranked[:sample_size])
+
+
+def _build_product_text(row: pd.Series) -> str:
+    return unique_join(
+        [
+            row["product_title"],
+            row["product_brand"],
+            row["product_color"],
+            row["product_description"],
+            row["product_bullet_point"],
+        ]
+    )
 
 
 def _build_searchable_text(row: pd.Series) -> str:
@@ -58,21 +94,52 @@ def _normalize_text_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def _attach_gain_columns(frame: pd.DataFrame, gain_mappings: dict[str, dict[str, float]]) -> pd.DataFrame:
+def _attach_gain_columns(
+    frame: pd.DataFrame, gain_mappings: dict[str, dict[str, float]]
+) -> pd.DataFrame:
     enriched = frame.copy()
     for mapping_name, mapping in gain_mappings.items():
         enriched[f"grade_{mapping_name}"] = enriched["esci_label"].map(mapping).astype(float)
     return enriched
 
 
-def _load_and_filter(settings: AppSettings, split_name: str) -> pd.DataFrame:
-    split_path = settings.train_path() if split_name == "train" else settings.test_path()
-    frame = _read_split(split_path, split_name=split_name)
+def _load_examples(settings: AppSettings) -> pd.DataFrame:
+    frame = pd.read_parquet(settings.examples_path(), columns=EXAMPLE_COLUMNS)
     frame = frame[
         (frame["product_locale"] == settings.filters["locale"])
         & (frame["small_version"] == settings.filters["small_version"])
+        & (frame["split"].isin(["train", "test"]))
     ].copy()
+    frame["esci_label"] = frame["esci_label"].replace(ESCI_LABEL_MAP)
     return frame
+
+
+def _sample_split(frame: pd.DataFrame, split_name: str, sample_size: int | None) -> pd.DataFrame:
+    split_frame = frame[frame["split"] == split_name].copy()
+    selected_queries = _stable_query_sample(
+        split_frame["query_id"].drop_duplicates().tolist(),
+        sample_size,
+    )
+    return split_frame[split_frame["query_id"].isin(selected_queries)].copy()
+
+
+def _load_products(settings: AppSettings, product_ids: set[str]) -> pd.DataFrame:
+    products = pd.read_parquet(
+        settings.products_path(),
+        columns=PRODUCT_COLUMNS,
+        filters=[("product_locale", "==", settings.filters["locale"])],
+    )
+    products = products[products["product_id"].isin(product_ids)].copy()
+    for column in [
+        "product_title",
+        "product_description",
+        "product_bullet_point",
+        "product_brand",
+        "product_color",
+    ]:
+        products[column] = products[column].fillna("").astype(str)
+    products["product_text"] = products.apply(_build_product_text, axis=1)
+    return products
 
 
 def _build_queries_table(frame: pd.DataFrame) -> pd.DataFrame:
@@ -131,13 +198,17 @@ def _build_baseline_run(frame: pd.DataFrame, split_name: str) -> pd.DataFrame:
         ),
         axis=1,
     )
-    baseline = baseline.sort_values(["query_id", "score", "product_id"], ascending=[True, False, True])
+    baseline = baseline.sort_values(
+        ["query_id", "score", "product_id"], ascending=[True, False, True]
+    )
     baseline["rank"] = baseline.groupby("query_id").cumcount() + 1
     baseline["system"] = "baseline"
     return baseline[["query_id", "product_id", "score", "rank", "system"]]
 
 
-def _data_quality_report(frame: pd.DataFrame, queries: pd.DataFrame, documents: pd.DataFrame) -> dict[str, Any]:
+def _data_quality_report(
+    frame: pd.DataFrame, queries: pd.DataFrame, documents: pd.DataFrame
+) -> dict[str, Any]:
     report: dict[str, Any] = {
         "overall": {
             "rows": int(len(frame)),
@@ -174,24 +245,33 @@ def prepare_dataset(settings: AppSettings, profile: str) -> PreparedArtifacts:
     reports_dir = ensure_dir(evaluation_dir / "reports")
 
     sources = pd.read_csv(settings.sources_csv)
-    train_frame = _load_and_filter(settings, "train")
-    test_frame = _load_and_filter(settings, "test")
+    examples = _load_examples(settings)
 
-    if profile_config.train_query_sample_size is not None:
-        selected_queries = _stable_query_sample(
-            train_frame["query_id"].drop_duplicates().tolist(),
-            profile_config.train_query_sample_size,
-        )
-        train_frame = train_frame[train_frame["query_id"].isin(selected_queries)].copy()
-
-    if profile_config.test_query_sample_size is not None:
-        selected_queries = _stable_query_sample(
-            test_frame["query_id"].drop_duplicates().tolist(),
-            profile_config.test_query_sample_size,
-        )
-        test_frame = test_frame[test_frame["query_id"].isin(selected_queries)].copy()
-
+    train_frame = _sample_split(
+        examples,
+        "train",
+        profile_config.train_query_sample_size,
+    )
+    test_frame = _sample_split(
+        examples,
+        "test",
+        profile_config.test_query_sample_size,
+    )
     combined = pd.concat([train_frame, test_frame], ignore_index=True)
+
+    product_ids = set(combined["product_id"].astype(str))
+    products = _load_products(settings, product_ids)
+    combined = combined.merge(
+        products,
+        how="left",
+        on=["product_locale", "product_id"],
+        validate="many_to_one",
+    )
+
+    missing_products = combined["product_title"].isna().sum()
+    if missing_products:
+        raise ValueError(f"Missing product metadata for {missing_products} ESCI examples.")
+
     combined = _normalize_text_columns(combined)
     combined = combined.merge(sources, how="left", on="query_id")
     combined["source"] = combined["source"].fillna("unknown")
