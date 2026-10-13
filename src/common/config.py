@@ -36,8 +36,8 @@ class AppSettings:
     default_profile: str
     minimum_free_disk_gb: int
     raw_data_root: Path
-    raw_train_file: str
-    raw_test_file: str
+    raw_examples_file: str
+    raw_products_file: str
     sources_csv: Path
     processed_root: Path
     evaluation_root: Path
@@ -67,11 +67,11 @@ class AppSettings:
     def evaluation_dir(self, profile: str | None) -> Path:
         return self.evaluation_root / self.resolved_profile(profile)
 
-    def train_path(self) -> Path:
-        return self.raw_data_root / self.raw_train_file
+    def examples_path(self) -> Path:
+        return self.raw_data_root / self.raw_examples_file
 
-    def test_path(self) -> Path:
-        return self.raw_data_root / self.raw_test_file
+    def products_path(self) -> Path:
+        return self.raw_data_root / self.raw_products_file
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -121,8 +121,8 @@ def load_settings(profile: str | None = None) -> AppSettings:
             root,
             env_or_default("ESCI_RAW_DATA_ROOT", config_data["raw_data"]["root"]),
         ),
-        raw_train_file=config_data["raw_data"]["train_file"],
-        raw_test_file=config_data["raw_data"]["test_file"],
+        raw_examples_file=config_data["raw_data"]["examples_file"],
+        raw_products_file=config_data["raw_data"]["products_file"],
         sources_csv=_resolve_path(
             root,
             env_or_default("ESCI_SOURCES_PATH", config_data["raw_data"]["sources_csv"]),
