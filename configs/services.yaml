@@ -5,9 +5,9 @@ project:
   minimum_free_disk_gb: 25
 
 raw_data:
-  root: "./esci-data-main/shopping_queries_dataset/data"
-  train_file: "esci_train.parquet"
-  test_file: "esci_test.parquet"
+  root: "./esci-data-main/shopping_queries_dataset"
+  examples_file: "shopping_queries_dataset_examples.parquet"
+  products_file: "shopping_queries_dataset_products.parquet"
   sources_csv: "./esci-data-main/shopping_queries_dataset/shopping_queries_dataset_sources.csv"
 
 paths:
